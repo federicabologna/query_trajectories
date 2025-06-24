@@ -1,4 +1,5 @@
 import json
+import time
 import os
 from collections import defaultdict
 from openai import OpenAI
@@ -31,17 +32,14 @@ def make_prompt(user_queries):
     user_query_list = "\n".join(f"- {q}" for q in user_queries)
 
     _system_prompt = """
-You are an assistant that clusters user-submitted queries by semantic and topical similarity.
-Your tasks are:
+You are an assistant that groups user-submitted queries by semantic and topical similarity.
 
-1. Cluster queries that are semantically and topically related. Note that some query may not fit into any cluster.
+Follow these steps:
+
+1. Group queries that are reformulations of each other, semantically or topically related. Note that some query may not fit into any group.
 2. Remove near-duplicates (e.g., minor rewordings or paraphrases).
 3. Use the provided example to guide your interpretation of related queries.
-4. Output a JSON object with the following keys:
-  - "num_clusters": number of distinct clusters
-  - "average_queries_per_cluster": average number of queries in each cluster
-  - "clusters": a list of clusters, each containing a "cluster_id" and the list of related queries
-  - "common_transition_types": a list of reformulation patterns between related queries
+4. Return your output in the following JSON format: {"cluster1": ["query1", "query2"], "cluster2": ["query3"]}. Each cluster should contain a list of deduplicated, related queries.
 
 Only return the JSON object. Do not include explanations or comments."""
 
@@ -51,35 +49,25 @@ Only return the JSON object. Do not include explanations or comments."""
 
 Now, consider the following user-submitted queries:
 {user_query_list}
-
-Please return the following in JSON format:
-{{
-  "num_clusters": <int>,
-  "average_queries_per_cluster": <float>,
-  "clusters": [
-    {{
-      "cluster_id": <int>,
-      "queries": [<list of deduplicated, related queries>]
-    }}
-  ],
-  "common_transition_types": [
-    "<summary of common transitions between queries, such as general to specific, term substitutions, question-to-statement, etc.>"
-  ]
-}}
-Only return the JSON object.
 """
     
     return _system_prompt, _user_prompt
 
-def analyze_user_queries(user_id, queries, model="gpt-4.1", max_tokens=1500):
+def analyze_user_queries(queries, model="gpt-4.1", max_tokens=1500):
     
     system_prompt, user_prompt = make_prompt(queries)
     
     client = OpenAI(
-        api_key = open(os.path.join('../../PhD/apikeys', 's2_openai_key')).read().strip()
+        api_key = open(os.path.join('../../PhD/apikeys', 'ai2_openai_key')).read().strip()
     )
 
-    response = client.chat.completions.create(
+    attempts = 0
+    max_attempts = 3
+    response = 'None'
+
+    while attempts < max_attempts:
+        try:
+            response = client.chat.completions.create(
                 model=model,
                 temperature=0.3,
                 max_completion_tokens=max_tokens,
@@ -88,14 +76,21 @@ def analyze_user_queries(user_id, queries, model="gpt-4.1", max_tokens=1500):
                     {'role': 'user', 'content': user_prompt}
                 ]
             )
+            
+            _answer = response.choices[0].message.content.strip()
+            answer_dict = json.loads(_answer)
+            break
 
-    content = response.choices[0].message.content.strip()
-    try:
-        result = json.loads(content)
-    except json.JSONDecodeError:
-        print(f"Warning: Couldn't parse JSON output for user {user_id}")
-        result = {"raw_response": content}
-    return result
+        except Exception as e:
+            print(f'Error {e}. Sleeping 3 seconds ...')
+            time.sleep(3)
+            if attempts == max_attempts-1:
+                answer_dict = f'Error {e}'
+
+        attempts += 1
+        time.sleep(0.5)
+
+    return answer_dict
 
 def main(jsonl_file_path, output_file_path):
     user_queries = load_queries_by_user(jsonl_file_path)
@@ -104,7 +99,7 @@ def main(jsonl_file_path, output_file_path):
         for user_id, queries in user_queries.items():
             print(f"Processing user {user_id} with {len(queries)} queries...")
             try:
-                result = analyze_user_queries(user_id, queries)
+                result = analyze_user_queries(queries)
                 result["user_id"] = user_id
                 out_file.write(json.dumps(result) + "\n")
             except Exception as e:
